@@ -2,7 +2,7 @@
  * Магазин прямо в чате с ботом — без Mini App. Управление — инлайн-кнопками
  * (из команд остался только /start, открывающий главное меню).
  *
- * Что умеет: каталог услуг (сеть → категория → услуга), оформление заказа
+ * Что умеет: каталог услуг (сеть → категория → услуга) и поиск по названию, оформление заказа
  * (количество → ссылка → подтверждение), оплата Telegram Stars или с баланса,
  * пополнение баланса, промокоды, история заказов, заявка на вывод, поддержка.
  *
@@ -24,6 +24,19 @@ const PAGE_SIZE = 8;
 const STATE_TTL_MS = 60 * 60 * 1000;
 const TOPUP_PRESETS = [50, 100, 250, 500, 1000];
 const MAX_TOPUP = 100000;
+const SEARCH_MAX_RESULTS = 64;     // сколько результатов поиска максимум храним/листаем
+const SEARCH_MIN_LEN = 2;
+
+// Синонимы соцсетей для поиска («тг», «инста», «ютуб» …)
+const NET_ALIASES = {
+  telegram:  'тг телеграм телега tg',
+  tiktok:    'тикток тик ток тт tt',
+  facebook:  'фейсбук фб fb',
+  instagram: 'инстаграм инста инстаграмм ig insta',
+  max:       'макс',
+  discord:   'дискорд',
+  youtube:   'ютуб ютьюб yt',
+};
 
 const LINK_TARGETS = {
   post:    { label: 'ссылку на пост',                    what: 'ссылка на пост',                    example: 'https://t.me/channel/123',                    needsUrl: true  },
@@ -71,6 +84,48 @@ module.exports = function registerShop(ctx) {
   for (const n of netInfo.values()) n.cats = n.cats.filter(c => c.services.length > 0);
   const visibleNets = [...netInfo.values()].filter(n => n.cats.length > 0);
 
+  /* ---------- Поиск: индекс по названию + категории + соцсети ---------- */
+  const normText = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е');
+  const splitWords = (s) => normText(s).split(/[^a-z0-9а-я]+/).filter(Boolean);
+  // грубый «стеммер», чтобы «подписчиков» находило «Подписчики», «лайков» — «Лайки»
+  const stem = (w) => (w.length >= 6 ? w.slice(0, -2) : w.length === 5 ? w.slice(0, -1) : w);
+
+  const searchIndex = [];
+  for (const svc of svcByHash.values()) {
+    const cat = catByHash.get(svc.catH);
+    const net = netInfo.get(svc.net);
+    const syn = (str) => (/premium/i.test(str) ? ' премиум' : '');   // «премиум» → Premium
+    const nameWords = splitWords(svc.name + syn(svc.name));
+    const otherWords = splitWords(`${cat.label} ${net.label} ${NET_ALIASES[svc.net] || ''}${syn(cat.label)}`);
+    searchIndex.push({
+      svc,
+      nameWords, otherWords,
+      nameStr: nameWords.join(' '),
+      otherStr: otherWords.join(' '),
+    });
+  }
+
+  // Все слова запроса должны встретиться (в названии, категории или соцсети).
+  // Короткие слова (1–2 символа, напр. «ru», «uz») — только как начало слова.
+  function searchServices(query) {
+    const tokens = splitWords(query).map(stem);
+    if (!tokens.length) return [];
+    const hit = (words, str, t) => words.some(w => w.startsWith(t)) || (t.length >= 3 && str.includes(t));
+    const found = [];
+    for (let i = 0; i < searchIndex.length; i++) {
+      const e = searchIndex[i];
+      let score = 0, ok = true;
+      for (const t of tokens) {
+        if (hit(e.nameWords, e.nameStr, t)) score += 2;
+        else if (hit(e.otherWords, e.otherStr, t)) score += 1;
+        else { ok = false; break; }
+      }
+      if (ok) found.push({ e, score, i });
+    }
+    found.sort((a, b) => b.score - a.score || a.i - b.i);
+    return found.map(f => f.e.svc);
+  }
+
   const botIds = new Set(catalog.services.map(s => s.id));
   const unsold = Object.keys(SERVICES).filter(id => !botIds.has(id)).length;
   console.log(`Магазин в боте: услуг ${svcByHash.size}, сетей ${visibleNets.length}`);
@@ -98,6 +153,16 @@ module.exports = function registerShop(ctx) {
   function setState(uid, s) { states.set(uid, { ...s, at: Date.now() }); }
   setInterval(() => { for (const uid of states.keys()) getState(uid); }, 10 * 60 * 1000).unref();
 
+  // Последний поиск пользователя (нужен для листания и кнопки «К результатам»).
+  const searches = new Map();   // uid -> { q, ids: [svcHash], at }
+  function getSearch(uid) {
+    const r = searches.get(uid);
+    if (!r) return null;
+    if (Date.now() - r.at > STATE_TTL_MS) { searches.delete(uid); return null; }
+    return r;
+  }
+  setInterval(() => { for (const uid of searches.keys()) getSearch(uid); }, 10 * 60 * 1000).unref();
+
   async function render(target, text, rows) {
     const opts = { reply_markup: { inline_keyboard: rows || [] }, disable_web_page_preview: true };
     const body = String(text).slice(0, 4000);
@@ -121,7 +186,7 @@ module.exports = function registerShop(ctx) {
 
   function screenMenu(user, uid) {
     const rows = [
-      [btn('🛒 Каталог услуг', 'm:cat')],
+      [btn('🛒 Каталог услуг', 'm:cat'), btn('🔍 Поиск', 'm:find')],
       [btn('💰 Баланс', 'm:bal'), btn('📦 Мои заказы', 'm:ord')],
       [btn('🎁 Промокод', 'm:promo'), btn('💸 Вывод', 'm:wd')],
       [btn('🆘 Поддержка', 'm:sup')],
@@ -139,8 +204,9 @@ module.exports = function registerShop(ctx) {
     for (let i = 0; i < visibleNets.length; i += 2) {
       rows.push(visibleNets.slice(i, i + 2).map(n => btn(`${n.icon} ${n.label}`, 'n:' + n.id)));
     }
+    rows.push([btn('🔍 Поиск услуги', 'm:find')]);
     rows.push(BACK_MENU);
-    return { text: '🛒 Каталог — выберите соцсеть:', rows };
+    return { text: '🛒 Каталог — выберите соцсеть (или найдите услугу поиском):', rows };
   }
 
   function screenCats(netId) {
@@ -179,17 +245,80 @@ module.exports = function registerShop(ctx) {
     return { text, rows };
   }
 
-  function screenService(svc) {
+  function screenAskSearch() {
+    return {
+      text: '🔍 Поиск услуги\n\nНапишите, что ищете — например: «подписчики», «реакции тг», «лайки тикток», «просмотры youtube».',
+      rows: [[btn('❌ Отмена', 'x')]],
+    };
+  }
+
+  function screenSearch(uid, page) {
+    const r = getSearch(uid);
+    if (!r) return null;
+    const total = r.ids.length;
+    if (!total) {
+      return {
+        text: `🔍 По запросу «${clip(r.q, 60)}» ничего не нашлось.\n\nПопробуйте другое слово (например «подписчики», «лайки», «просмотры») или название соцсети.`,
+        rows: [[btn('🔍 Искать снова', 'm:find')], [btn('🛒 Каталог услуг', 'm:cat'), btn('🏠 Меню', 'm:menu')]],
+      };
+    }
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    page = Math.min(Math.max(0, page | 0), pages - 1);
+    const slice = r.ids.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE).map(h => svcByHash.get(h)).filter(Boolean);
+
+    const lines = slice.map((s, i) => {
+      const p = SERVICES[s.id];
+      const n = netInfo.get(s.net);
+      const cat = catByHash.get(s.catH);
+      return `${i + 1}. ${s.name}\n    ${n.icon} ${n.label} › ${cat.label}\n    от ${p.price1000} ⭐ за 1000 · ${fmt(p.min)}–${fmt(p.max)}`;
+    });
+    const capped = r.capped ? '\n(показаны первые результаты — уточните запрос, чтобы сузить список)' : '';
+    const text = `🔍 «${clip(r.q, 60)}» — найдено: ${total}${r.capped ? '+' : ''}\nСтраница ${page + 1}/${pages}\n\n${lines.join('\n\n')}${capped}\n\nНажмите номер услуги:`;
+
+    const rows = [];
+    const numRow = slice.map((s, i) => btn(String(i + 1), `s:${s.h}:f${page}`));
+    for (let i = 0; i < numRow.length; i += 4) rows.push(numRow.slice(i, i + 4));
+    if (pages > 1) {
+      const nav = [];
+      if (page > 0) nav.push(btn('◀', `f:${page - 1}`));
+      nav.push(btn(`${page + 1}/${pages}`, `f:${page}`));
+      if (page < pages - 1) nav.push(btn('▶', `f:${page + 1}`));
+      rows.push(nav);
+    }
+    rows.push([btn('🔍 Новый поиск', 'm:find'), btn('🏠 Меню', 'm:menu')]);
+    return { text, rows };
+  }
+
+  async function runSearch(target, uid, query) {
+    const q = String(query || '').trim();
+    if (q.length < SEARCH_MIN_LEN) {
+      setState(uid, { step: 'search' });
+      return render(target, `Слишком короткий запрос — напишите хотя бы ${SEARCH_MIN_LEN} символа.`, [[btn('❌ Отмена', 'x')]]);
+    }
+    const all = searchServices(q);
+    searches.set(uid, { q, ids: all.slice(0, SEARCH_MAX_RESULTS).map(s => s.h), capped: all.length > SEARCH_MAX_RESULTS, at: Date.now() });
+    const s = screenSearch(uid, 0);
+    return render(target, s.text, s.rows);
+  }
+
+  // from — откуда открыли карточку: 'f<стр>' = из поиска, иначе из списка категории
+  function screenService(svc, from) {
     const p = SERVICES[svc.id];
     const t = LINK_TARGETS[svc.target] || LINK_TARGETS.channel;
     const cat = catByHash.get(svc.catH);
-    const idx = cat.services.indexOf(svc);
-    const page = Math.floor(idx / PAGE_SIZE);
+    let back;
+    const m = /^f(\d+)$/.exec(from || '');
+    if (m) {
+      back = btn('⬅ К результатам', `f:${m[1]}`);
+    } else {
+      const idx = cat.services.indexOf(svc);
+      back = btn('⬅ К списку', `c:${svc.catH}:${Math.floor(idx / PAGE_SIZE)}`);
+    }
     return {
       text: `${svc.name}\n\n💵 Цена: ${p.price1000} ⭐ за 1000\n📏 Количество: от ${fmt(p.min)} до ${fmt(p.max)}\n🔗 Понадобится: ${t.what}`,
       rows: [
         [btn('🛒 Заказать', 'o:' + svc.h)],
-        [btn('⬅ К списку', `c:${svc.catH}:${page}`), btn('🏠 Меню', 'm:menu')],
+        [back, btn('🏠 Меню', 'm:menu')],
       ],
     };
   }
@@ -505,7 +634,13 @@ module.exports = function registerShop(ctx) {
       const target = to(msg);
 
       if (!st) {
-        return render(target, 'Не понял вас 🙂 Выберите действие в меню:', screenMenu(touchUser(msg.from), msg.from.id).rows);
+        // Просто написали слово без кнопок — считаем это поиском услуги
+        return runSearch(target, uid, msg.text);
+      }
+
+      if (st.step === 'search') {
+        states.delete(uid);
+        return runSearch(target, uid, msg.text);
       }
 
       if (st.step === 'qty') {
@@ -557,7 +692,7 @@ module.exports = function registerShop(ctx) {
   bot.on('callback_query', async (query) => {
     const data = String(query.data || '');
     if (data.startsWith('wd_')) return;                       // кнопки владельца обрабатываются в server.js
-    if (!/^(m|n|c|s|o|q|t|x|pay|chk)(:|$)/.test(data)) return;
+    if (!/^(m|n|c|s|o|q|t|x|f|pay|chk)(:|$)/.test(data)) return;
     if (!query.message || !query.from) { bot.answerCallbackQuery(query.id).catch(() => {}); return; }
 
     const uid = query.from.id;
@@ -570,6 +705,7 @@ module.exports = function registerShop(ctx) {
         states.delete(uid);
         if (a === 'menu') await showMenu(target, query.from);
         else if (a === 'cat') { const s = screenNetworks(); await render(target, s.text, s.rows); }
+        else if (a === 'find') { setState(uid, { step: 'search' }); const s = screenAskSearch(); await render(target, s.text, s.rows); }
         else if (a === 'bal') { const s = screenBalance(touchUser(query.from)); await render(target, s.text, s.rows); }
         else if (a === 'ord') { const s = screenOrders(touchUser(query.from)); await render(target, s.text, s.rows); }
         else if (a === 'sup') { const s = screenSupport(); await render(target, s.text, s.rows); }
@@ -579,10 +715,14 @@ module.exports = function registerShop(ctx) {
         const s = screenCats(a); await render(target, s.text, s.rows);
       } else if (kind === 'c') {
         const s = screenList(a, Number(b) || 0); await render(target, s.text, s.rows);
+      } else if (kind === 'f') {
+        const s = screenSearch(uid, Number(a) || 0);
+        if (!s) alertText = 'Результаты поиска устарели — повторите поиск';
+        else await render(target, s.text, s.rows);
       } else if (kind === 's') {
         const svc = svcByHash.get(a);
         if (!svc) alertText = 'Услуга больше недоступна — откройте каталог заново';
-        else { const s = screenService(svc); await render(target, s.text, s.rows); }
+        else { const s = screenService(svc, b); await render(target, s.text, s.rows); }
       } else if (kind === 'o') {
         const svc = svcByHash.get(a);
         if (!svc) alertText = 'Услуга больше недоступна — откройте каталог заново';
