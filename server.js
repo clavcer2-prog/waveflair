@@ -1412,11 +1412,11 @@ bot.on('message', async (msg) => {
   }
 });
 
-/* ---------- Магазин в чате (команды и кнопки, без Mini App) ---------- */
+/* ---------- Магазин в чате (инлайн-кнопки, без Mini App) ---------- */
 require('./bot-shop')({
   bot, SERVICES, pendingOrders, withdrawalRequests, BALANCE_PROMO_CODES,
   MIN_WITHDRAW_AMOUNT, NEWS_CHANNEL, SUPPORT_USERNAME, OWNER_CHAT_ID,
-  WEBAPP_URL, MINIAPP_ENABLED,
+  WEBAPP_URL, MINIAPP_ENABLED, ADMIN_PASSWORD,
   touchUser, saveData, round2, itemPrice, recomputeSubtotal, isSubscribed,
   orderToHistoryEntry, notifyOwner, fulfillOrder, withRetry,
 });

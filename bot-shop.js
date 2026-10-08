@@ -1,5 +1,6 @@
 /**
- * Магазин прямо в чате с ботом — без Mini App.
+ * Магазин прямо в чате с ботом — без Mini App. Управление — инлайн-кнопками
+ * (из команд остался только /start, открывающий главное меню).
  *
  * Что умеет: каталог услуг (сеть → категория → услуга), оформление заказа
  * (количество → ссылка → подтверждение), оплата Telegram Stars или с баланса,
@@ -35,7 +36,7 @@ module.exports = function registerShop(ctx) {
   const {
     bot, SERVICES, pendingOrders, withdrawalRequests, BALANCE_PROMO_CODES,
     MIN_WITHDRAW_AMOUNT, NEWS_CHANNEL, SUPPORT_USERNAME, OWNER_CHAT_ID,
-    WEBAPP_URL, MINIAPP_ENABLED,
+    WEBAPP_URL, MINIAPP_ENABLED, ADMIN_PASSWORD,
     touchUser, saveData, round2, itemPrice, recomputeSubtotal, isSubscribed,
     orderToHistoryEntry, notifyOwner, fulfillOrder, withRetry,
   } = ctx;
@@ -113,7 +114,12 @@ module.exports = function registerShop(ctx) {
   }
 
   /* ---------- Экраны ---------- */
-  function screenMenu(user) {
+  let adminUrl = null;
+  try { if (ADMIN_PASSWORD && WEBAPP_URL) adminUrl = new URL('/admin', WEBAPP_URL).toString(); }
+  catch (err) { console.warn('Кнопка админ-панели отключена: некорректный WEBAPP_URL'); }
+  const isOwner = (uid) => String(uid) === String(OWNER_CHAT_ID);
+
+  function screenMenu(user, uid) {
     const rows = [
       [btn('🛒 Каталог услуг', 'm:cat')],
       [btn('💰 Баланс', 'm:bal'), btn('📦 Мои заказы', 'm:ord')],
@@ -121,6 +127,7 @@ module.exports = function registerShop(ctx) {
       [btn('🆘 Поддержка', 'm:sup')],
     ];
     if (MINIAPP_ENABLED && WEBAPP_URL) rows.push([{ text: '🛍 Открыть Mini App', web_app: { url: WEBAPP_URL } }]);
+    if (isOwner(uid) && adminUrl) rows.push([urlBtn('🛠 Админ-панель', adminUrl)]);   // только владельцу, откроется в браузере
     return {
       text: `☀️ SMM Store — подписчики, просмотры и реакции с оплатой в Telegram Stars.\n\n💰 Баланс: ${round2(user.balance)} ⭐\n\nВыберите действие:`,
       rows,
@@ -457,11 +464,13 @@ module.exports = function registerShop(ctx) {
   }
 
   function showMenu(target, tgUser) {
-    const s = screenMenu(touchUser(tgUser));
+    const s = screenMenu(touchUser(tgUser), tgUser.id);
     return render(target, s.text, s.rows);
   }
 
-  /* ---------- Команды ---------- */
+  /* ---------- Вход в бота ----------
+     Единственная команда — /start (и алиас /menu): она открывает главное меню,
+     дальше всё делается инлайн-кнопками. Остальные слэш-команды убраны. */
   const privateOnly = (fn) => async (msg, match) => {
     if (!msg.from || msg.chat.type !== 'private') return;
     states.delete(msg.from.id);
@@ -471,37 +480,12 @@ module.exports = function registerShop(ctx) {
   const cmd = (name) => new RegExp(`^\\/${name}(?:@\\w+)?(?:\\s+([\\s\\S]*))?$`, 'i');
 
   bot.onText(cmd('(?:start|menu)'), privateOnly((msg) => showMenu(to(msg), msg.from)));
-  bot.onText(cmd('(?:catalog|order)'), privateOnly((msg) => { const s = screenNetworks(); return render(to(msg), s.text, s.rows); }));
-  bot.onText(cmd('balance'), privateOnly((msg) => { const s = screenBalance(touchUser(msg.from)); return render(to(msg), s.text, s.rows); }));
-  bot.onText(cmd('orders'), privateOnly((msg) => { const s = screenOrders(touchUser(msg.from)); return render(to(msg), s.text, s.rows); }));
-  bot.onText(cmd('support'), privateOnly((msg) => { const s = screenSupport(); return render(to(msg), s.text, s.rows); }));
-  bot.onText(cmd('cancel'), privateOnly((msg) => render(to(msg), 'Отменено.', [BACK_MENU])));
-
-  bot.onText(cmd('topup'), privateOnly(async (msg, match) => {
-    const arg = (match[1] || '').trim();
-    if (arg) return startTopup(to(msg), msg.from, arg.replace(',', '.'));
-    const s = screenBalance(touchUser(msg.from));
-    return render(to(msg), s.text, s.rows);
-  }));
-
-  bot.onText(cmd('promo'), privateOnly(async (msg, match) => {
-    const arg = (match[1] || '').trim();
-    if (arg) return redeemPromo(to(msg), msg.from, arg);
-    setState(msg.from.id, { step: 'promo' });
-    return render(to(msg), '🎁 Отправьте промокод одним сообщением.', [[btn('❌ Отмена', 'x')]]);
-  }));
-
-  bot.onText(cmd('withdraw'), privateOnly(async (msg, match) => {
-    const arg = (match[1] || '').trim();
-    if (arg) return requestWithdraw(to(msg), msg.from, arg.replace(',', '.'));
-    return askWithdraw(to(msg), msg.from);
-  }));
 
   function askWithdraw(target, tgUser) {
     const user = touchUser(tgUser);
     setState(tgUser.id, { step: 'withdraw' });
     return render(target,
-      `💸 Вывод баланса\n\nНа балансе: ${round2(user.balance)} ⭐. Минимум для вывода: ${MIN_WITHDRAW_AMOUNT} ⭐.\nОтправьте сумму числом (или /cancel):`,
+      `💸 Вывод баланса\n\nНа балансе: ${round2(user.balance)} ⭐. Минимум для вывода: ${MIN_WITHDRAW_AMOUNT} ⭐.\nОтправьте сумму числом:`,
       [[btn('❌ Отмена', 'x')]]);
   }
 
@@ -509,13 +493,19 @@ module.exports = function registerShop(ctx) {
   bot.on('message', async (msg) => {
     try {
       if (!msg.from || msg.chat.type !== 'private' || msg.successful_payment) return;
-      if (typeof msg.text !== 'string' || msg.text.startsWith('/')) return;
+      if (typeof msg.text !== 'string') return;
+      if (msg.text.startsWith('/')) {
+        // /start, /menu и /admin обрабатываются отдельно; любую другую команду просто сводим к меню с кнопками
+        if (/^\/(start|menu|admin)(@\w+)?(\s|$)/i.test(msg.text)) return;
+        states.delete(msg.from.id);
+        return showMenu(to(msg), msg.from);
+      }
       const uid = msg.from.id;
       const st = getState(uid);
       const target = to(msg);
 
       if (!st) {
-        return render(target, 'Не понял вас 🙂 Выберите действие в меню:', screenMenu(touchUser(msg.from)).rows);
+        return render(target, 'Не понял вас 🙂 Выберите действие в меню:', screenMenu(touchUser(msg.from), msg.from.id).rows);
       }
 
       if (st.step === 'qty') {
@@ -636,16 +626,10 @@ module.exports = function registerShop(ctx) {
     bot.answerCallbackQuery(query.id, alertText ? { text: alertText, show_alert: true } : {}).catch(() => {});
   });
 
-  /* ---------- Меню команд (слева от поля ввода) ---------- */
+  /* ---------- Меню команд (слева от поля ввода) ----------
+     Оставляем одну команду — вернуться в главное меню; всё остальное — кнопки. */
   const commands = [
-    { command: 'start',    description: 'Главное меню' },
-    { command: 'catalog',  description: 'Каталог услуг' },
-    { command: 'balance',  description: 'Баланс и пополнение' },
-    { command: 'orders',   description: 'Мои заказы' },
-    { command: 'promo',    description: 'Ввести промокод' },
-    { command: 'withdraw', description: 'Вывести баланс' },
-    { command: 'support',  description: 'Поддержка' },
-    { command: 'cancel',   description: 'Отменить действие' },
+    { command: 'start', description: '🏠 Главное меню' },
   ];
   Promise.resolve(bot.setMyCommands(commands)).catch((err) => console.warn('Не удалось установить список команд:', err && err.message));
 };
