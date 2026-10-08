@@ -128,7 +128,7 @@ module.exports = function registerShop(ctx) {
 
   const botIds = new Set(catalog.services.map(s => s.id));
   const unsold = Object.keys(SERVICES).filter(id => !botIds.has(id)).length;
-  console.log(`Магазин в боте: услуг ${svcByHash.size}, сетей ${visibleNets.length}`);
+  console.log(`Магазин в боте: услуг ${svcByHash.size}, сетей ${visibleNets.length} · ПОИСК ВКЛЮЧЁН (индекс: ${searchIndex.length})`);
   if (unsold > 0) console.warn(`Магазин в боте: ${unsold} услуг на сервере без описания — запустите: node build-bot-catalog.js`);
   if (missingPrices > 0) console.warn(`Магазин в боте: ${missingPrices} услуг из bot-catalog.js нет в серверных каталогах — они скрыты`);
 
