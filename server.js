@@ -1,4 +1,3 @@
-app.use((req, res, next) => { console.log(req.method, req.url); next(); });
 /**
  * SMM Store — пример бэкенда: оплата Stars, профиль (баланс + история),
  * промокоды.
@@ -37,6 +36,10 @@ const TelegramBot = require('node-telegram-bot-api');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID;
 const WEBAPP_URL = process.env.WEBAPP_URL; // публичный https-адрес, где хостится index.html
+// По умолчанию бот работает БЕЗ Mini App — всё через команды и кнопки в чате
+// (см. bot-shop.js). Чтобы вернуть кнопку «Открыть магазин» (Mini App) в меню и
+// в /start, задайте MINIAPP_ENABLED=true. WEBAPP_URL при этом нужен и для /admin.
+const MINIAPP_ENABLED = String(process.env.MINIAPP_ENABLED || '').toLowerCase() === 'true';
 const PORT = process.env.PORT || 3000;
 const TWIBOOST_API_KEY = process.env.TWIBOOST_API_KEY; // ключ из личного кабинета twiboost.com → API
 const TWIBOOST_API_URL = 'https://twiboost.com/api/v2';
@@ -156,6 +159,8 @@ setInterval(() => {
   if (pollingErrCount > 0 && Date.now() - lastPollingErrAt > 60000) pollingErrCount = 0;
 }, 30000);
 const app = express();
+// Лог каждого запроса к серверу (удобно проверять, доходит ли трафик до приложения).
+app.use((req, res, next) => { console.log(req.method, req.url); next(); });
 // Для /admin/api/restore тело читаем сырым (там свой парсер с большим лимитом).
 app.use((req, res, next) =>
   req.path === '/admin/api/restore' ? next() : express.json()(req, res, next));
@@ -406,7 +411,7 @@ const BALANCE_PROMO_CODES = {
 // администратором канала @yanvismokcoded (иначе Bot API вернёт ошибку
 // на getChatMember, и это будет видно в логах сервера).
 const NEWS_CHANNEL = '@yanvismokcoded';
-const SUPPORT_USERNAME = '@irlmetalbat';
+const SUPPORT_USERNAME = '@loserpilled';
 
 /* ---------- Услуги для ручной выдачи (Premium Реакции) ----------
    Для этих serviceId автовыдача через twiboost НЕ запускается, даже если
@@ -1198,23 +1203,7 @@ async function notifyOwner(tgUser, items, total, method) {
   }
 }
 
-/* ---------- Открытие Mini App через инлайн-кнопку ---------- */
-bot.onText(/\/start/, async (msg) => {
-  if (!WEBAPP_URL) {
-    return bot.sendMessage(msg.chat.id, 'Магазин временно недоступен: администратор ещё не подключил WEBAPP_URL.');
-  }
-  await bot.sendMessage(
-    msg.chat.id,
-    '☀️ SMM Store — подписчики, просмотры и реакции с оплатой в Telegram Stars.\n\nНажмите кнопку ниже, чтобы открыть магазин:',
-    {
-      reply_markup: {
-        inline_keyboard: [[
-          { text: '🛍 Открыть магазин', web_app: { url: WEBAPP_URL } },
-        ]],
-      },
-    }
-  );
-});
+/* /start и весь магазин в чате — в bot-shop.js (подключается внизу файла). */
 
 /* ---------- Открытие админ-панели из бота (только для владельца) ----------
    ВАЖНО: кнопка сделана через "url", а НЕ "web_app". Админ-панель защищена
@@ -1238,14 +1227,17 @@ bot.onText(/\/admin/, async (msg) => {
   );
 });
 
-// Постоянная кнопка меню слева от поля ввода (открывает Mini App в один тап).
-// Необязательная фича — если она по какой-то причине не срабатывает,
-// это не должно ронять сервер: инлайн-кнопка из /start и так открывает магазин.
-if (WEBAPP_URL && typeof bot.setChatMenuButton === 'function') {
+// Кнопка меню слева от поля ввода. Режим Mini App (MINIAPP_ENABLED=true) —
+// открывает магазин в один тап; иначе — обычное меню команд бота. Явно
+// ставим 'commands', иначе у пользователей останется старая кнопка «Магазин»,
+// сохранённая Telegram с прошлых запусков.
+// Необязательная фича — если не сработает, это не должно ронять сервер.
+if (typeof bot.setChatMenuButton === 'function') {
+  const menuButton = (MINIAPP_ENABLED && WEBAPP_URL)
+    ? { type: 'web_app', text: 'Магазин', web_app: { url: WEBAPP_URL } }
+    : { type: 'commands' };
   try {
-    Promise.resolve(bot.setChatMenuButton({
-      menu_button: { type: 'web_app', text: 'Магазин', web_app: { url: WEBAPP_URL } },
-    }))
+    Promise.resolve(bot.setChatMenuButton({ menu_button: menuButton }))
       .then(() => console.log('Кнопка меню установлена'))
       .catch((err) => console.warn('Не удалось установить кнопку меню:', err && err.message));
   } catch (err) {
@@ -1418,6 +1410,15 @@ bot.on('message', async (msg) => {
     saveData();
     bot.sendMessage(OWNER_CHAT_ID, `🚨 Автовыдача упала с ошибкой (${err && err.message}). Заказ оплачен — выдайте вручную.`).catch(() => {});
   }
+});
+
+/* ---------- Магазин в чате (команды и кнопки, без Mini App) ---------- */
+require('./bot-shop')({
+  bot, SERVICES, pendingOrders, withdrawalRequests, BALANCE_PROMO_CODES,
+  MIN_WITHDRAW_AMOUNT, NEWS_CHANNEL, SUPPORT_USERNAME, OWNER_CHAT_ID,
+  WEBAPP_URL, MINIAPP_ENABLED,
+  touchUser, saveData, round2, itemPrice, recomputeSubtotal, isSubscribed,
+  orderToHistoryEntry, notifyOwner, fulfillOrder, withRetry,
 });
 
 app.listen(PORT, () => console.log(`Server on :${PORT}`));

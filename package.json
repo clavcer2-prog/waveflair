@@ -2,10 +2,11 @@
   "name": "smm-store",
   "version": "1.0.0",
   "private": true,
-  "description": "Telegram Mini App магазин SMM-услуг с оплатой в Telegram Stars",
+  "description": "Telegram-магазин SMM-услуг (бот с командами/кнопками + опциональный Mini App), оплата в Telegram Stars",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build:bot-catalog": "node build-bot-catalog.js"
   },
   "engines": {
     "node": ">=18"
