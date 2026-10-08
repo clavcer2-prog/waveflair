@@ -97,6 +97,7 @@ if (!WEBAPP_URL) {
 }
 
 const bot = new TelegramBot(BOT_TOKEN, {
+  bot.on('callback_query', (q) => console.log('[cb]', q.data, 'от', q.from.id));
   // long polling: 30 c ожидания на стороне Telegram, короткая пауза между запросами.
   polling: { interval: 300, params: { timeout: 30 } },
   // keepAlive + принудительный IPv4: на части хостингов (в т.ч. Railway) запросы
